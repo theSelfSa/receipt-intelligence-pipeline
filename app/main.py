@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+import redis.asyncio as redis
 
 from app.config import get_settings
 from app.database import check_database_health, close_database, init_database
@@ -52,9 +53,11 @@ app.include_router(retrain_router)
 @app.get("/health", response_model=HealthResponse, tags=["system"])
 async def health() -> HealthResponse:
     db_ok = await check_database_health()
+    redis_ok = await check_redis_health(settings.redis_url)
     return HealthResponse(
-        status="ok" if db_ok else "degraded",
+        status="ok" if db_ok and redis_ok else "degraded",
         database="ok" if db_ok else "down",
+        redis="ok" if redis_ok else "down",
     )
 
 
@@ -62,3 +65,13 @@ async def health() -> HealthResponse:
 async def metrics() -> Response:
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+async def check_redis_health(redis_url: str) -> bool:
+    client = redis.from_url(redis_url)
+    try:
+        return bool(await client.ping())
+    except Exception:
+        return False
+    finally:
+        await client.aclose()
