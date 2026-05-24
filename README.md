@@ -1,76 +1,108 @@
 # Receipt Intelligence Pipeline
-Production-grade OCR + LLM receipt understanding service with confidence routing, active learning, error analysis, and retraining workflows.
+Production-grade OCR + LLM pipeline for extracting structured receipt data, routing uncertain predictions to review, and continuously improving extraction quality through active-learning feedback loops.
 
-## What this project does
-- Extracts structured receipt data from image/PDF uploads
-- Uses AWS Textract as primary OCR with Tesseract fallback
-- Runs schema-constrained extraction with GPT-4o + Instructor
-- Computes composite confidence and routes uncertain outputs to review
-- Matches line items to a canonical product catalog (fuzzy + embeddings)
-- Captures human corrections and feeds error analysis/retraining
-- Exposes analytics, calibration, cost, and metrics endpoints
+## Overview
+This project combines document OCR, schema-constrained LLM extraction, confidence calibration, catalog matching, and retraining workflows into a single service-oriented platform. It is designed for real-world receipt ingestion where scan quality and receipt formats vary significantly.
+
+## Core capabilities
+- OCR with **AWS Textract** (primary) and **Tesseract** fallback
+- Typed extraction using **GPT-4o + Instructor** with strict Pydantic models
+- Composite confidence scoring with automated routing:
+  - high confidence: auto-complete
+  - medium/low confidence: review queue
+- Product normalization with fuzzy + embedding-based matching
+- Human correction capture and error pattern analytics
+- Scheduled and manual retraining pipeline with run tracking
+- Benchmark tooling for CORD dataset evaluation and reporting
 
 ## Architecture
 ```mermaid
 flowchart LR
-    A[Upload Receipt] --> B[Preprocess Image/PDF]
-    B --> C[OCR Textract or Tesseract]
-    C --> D[LLM Extraction to Receipt Schema]
+    A[Upload Receipt] --> B[Preprocess Image or PDF]
+    B --> C[OCR: Textract -> Tesseract Fallback]
+    C --> D[LLM Extraction: Receipt Schema]
     D --> E[Confidence Scoring]
     E --> F[Catalog Matching]
     F --> G{Confidence Level}
-    G -->|High| H[Auto Complete]
+    G -->|High| H[Finalize]
     G -->|Medium or Low| I[Review Queue]
-    I --> J[Corrections]
-    J --> K[Error Pattern Analysis]
+    I --> J[Reviewer Corrections]
+    J --> K[Error Analysis]
     J --> L[Retraining Trigger]
 ```
 
-## Implemented scope (Day 1-3)
-- FastAPI app with lifespan startup/shutdown
-- Async SQLAlchemy models for receipts, line items, review queue, error patterns, retraining runs, and product catalog
-- Full endpoint groups from spec:
-  - `receipts`, `review`, `catalog`, `analytics`, `retrain`, `health`, `metrics`
-- Celery worker + beat jobs:
-  - nightly error analysis
-  - monthly scheduled retraining
-- PDF first-page preprocessing and image enhancement pipeline
-- Weak supervision retraining artifact generation + optional W&B logging
+## Tech stack
+- **API**: FastAPI, Pydantic v2, async SQLAlchemy
+- **Queueing**: Celery + Redis
+- **Database**: PostgreSQL + pgvector
+- **OCR/LLM**: AWS Textract, pytesseract, OpenAI, Instructor
+- **Matching & analytics**: rapidfuzz, embeddings, pandas
+- **Observability**: structlog, Prometheus `/metrics`
+- **Testing**: pytest, pytest-asyncio, httpx
+
+## Project structure
+- `app/main.py`: FastAPI app and lifecycle wiring
+- `app/routers/`: API route groups (`receipts`, `review`, `catalog`, `analytics`, `retrain`)
+- `app/services/`: OCR, extraction, confidence, matching, error analysis, retraining
+- `app/models/`: DB ORM models and API schemas
+- `app/worker.py`: Celery tasks + scheduled jobs
+- `benchmarks/`: CORD evaluation and report generation scripts
+- `tests/`: unit/integration-oriented test modules
 
 ## Quick start
-1. Copy environment template:
-   - `cp .env.example .env`
-2. Set required secrets in `.env`:
-   - `OPENAI_API_KEY`
-   - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (optional if relying on Tesseract fallback)
-3. Start services:
-   - `docker compose up --build`
-4. Open API docs:
-   - `http://localhost:8000/docs`
+### 1) Configure environment
+Copy `.env.example` to `.env` and set required values:
+- `OPENAI_API_KEY`
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (optional if using fallback OCR only)
 
-## Core API groups
-- `POST /receipts/upload`, `POST /receipts/batch`, `GET /receipts/*`
-- `GET /review/queue`, `GET /review/{id}`, `POST /review/{id}/correct|approve|skip`
-- `GET/POST /catalog/*` including `/catalog/match` and `/catalog/embed`
-- `GET /analytics/errors|accuracy|confidence|cost`, `POST /analytics/analyze`
-- `POST /retrain/trigger`, `GET /retrain/runs`, `GET /retrain/runs/{id}`
-- `GET /health`, `GET /metrics`
+### 2) Run with Docker Compose
+`docker compose up --build`
+
+### 3) Open API docs
+`http://localhost:8000/docs`
+
+## API surface
+### Receipt processing
+- `POST /receipts/upload`
+- `POST /receipts/batch`
+- `GET /receipts/{id}`
+- `GET /receipts/{id}/image`
+- `GET /receipts/{id}/ocr`
+- `GET /receipts/`
+- `GET /receipts/stats`
+
+### Human review
+- `GET /review/queue`
+- `GET /review/{id}`
+- `POST /review/{id}/correct`
+- `POST /review/{id}/approve`
+- `POST /review/{id}/skip`
+- `GET /review/stats`
+
+### Catalog / analytics / retraining
+- `GET|POST /catalog/*`
+- `GET|POST /analytics/*`
+- `POST /retrain/trigger`
+- `GET /retrain/runs`
+- `GET /retrain/runs/{id}`
+
+### System
+- `GET /health`
+- `GET /metrics`
+
+## Testing and quality checks
+- `python -m compileall app tests benchmarks`
+- `python -m pytest tests`
 
 ## Benchmarking (CORD)
-Run CORD evaluation and produce JSON:
+Run CORD benchmark:
 - `python benchmarks/run_cord.py --split test --limit 100`
 
-Generate README-ready markdown report from the latest JSON:
+Generate markdown report from latest benchmark JSON:
 - `python benchmarks/report.py`
 
-Or specify explicit files:
+Generate report from explicit file:
 - `python benchmarks/report.py --input benchmarks/results/cord_test_<timestamp>.json --output benchmarks/results/cord_report.md`
 
-## Testing and validation
-- `python -m compileall app tests benchmarks`
-- `pytest tests/test_ocr.py tests/test_extraction.py tests/test_confidence.py tests/test_matching.py tests/test_api.py`
-
-## Notes
-- All configuration is environment-driven (`.env`, `.env.example`).
-- Prometheus metrics are available at `/metrics`.
-- Uploaded files are stored under `uploads/` by default.
+## License
+This project is licensed under the **MIT License**. See `LICENSE`.
