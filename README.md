@@ -57,8 +57,10 @@ Copy `.env.example` to `.env` and set required values:
 
 ### 2) Run with Docker Compose
 `docker compose up --build`
+### 3) Seed sample product catalog (recommended)
+`python -m app.scripts.seed_catalog --csv data/sample_products.csv`
 
-### 3) Open API docs
+### 4) Open API docs
 `http://localhost:8000/docs`
 
 ## API surface
@@ -90,9 +92,17 @@ Copy `.env.example` to `.env` and set required values:
 - `GET /health`
 - `GET /metrics`
 
+`/health` reports both database and Redis status.
+
 ## Testing and quality checks
 - `python -m compileall app tests benchmarks`
 - `python -m pytest tests`
+
+## Continuous Integration
+GitHub Actions workflow runs on push/PR and executes:
+- dependency installation
+- compile checks (`python -m compileall app tests benchmarks`)
+- full test suite (`python -m pytest tests`)
 
 ## Benchmarking (CORD)
 Run CORD benchmark:
