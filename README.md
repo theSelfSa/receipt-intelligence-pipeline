@@ -1,130 +1,162 @@
 # Receipt Intelligence Pipeline
-Production-grade OCR + LLM pipeline for extracting structured receipt data, routing uncertain predictions to review, and continuously improving extraction quality through active-learning feedback loops.
+[![CI](https://github.com/theSelfSa/receipt-intelligence-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/theSelfSa/receipt-intelligence-pipeline/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 
-## Overview
-This project combines document OCR, schema-constrained LLM extraction, confidence calibration, catalog matching, and retraining workflows into a single service-oriented platform. It is designed for real-world receipt ingestion where scan quality and receipt formats vary significantly.
+End-to-end OCR + LLM platform for turning messy receipt images/PDFs into structured, reviewable, and continuously improving financial data.
 
-## Core capabilities
-- OCR with **AWS Textract** (primary) and **Tesseract** fallback
-- Typed extraction using **GPT-4o + Instructor** with strict Pydantic models
-- Composite confidence scoring with automated routing:
-  - high confidence: auto-complete
-  - medium/low confidence: review queue
-- Product normalization with fuzzy + embedding-based matching
-- Human correction capture and error pattern analytics
-- Scheduled and manual retraining pipeline with run tracking
-- Benchmark tooling for CORD dataset evaluation and reporting
+## Why this project
+Receipt extraction fails in real-world conditions: noisy scans, inconsistent layouts, ambiguous totals, and vendor-specific line-item formats.  
+This pipeline addresses that with:
+- resilient OCR (Textract primary + Tesseract fallback)
+- schema-constrained extraction into typed receipt objects
+- confidence-based routing to human review
+- catalog normalization (fuzzy + vector matching)
+- feedback loops for error analysis and retraining runs
 
-## Architecture
+## Pipeline architecture
 ```mermaid
 flowchart LR
-    A[Upload Receipt] --> B[Preprocess Image or PDF]
-    B --> C[OCR: Textract -> Tesseract Fallback]
-    C --> D[LLM Extraction: Receipt Schema]
-    D --> E[Confidence Scoring]
-    E --> F[Catalog Matching]
-    F --> G{Confidence Level}
-    G -->|High| H[Finalize]
-    G -->|Medium or Low| I[Review Queue]
-    I --> J[Reviewer Corrections]
-    J --> K[Error Analysis]
-    J --> L[Retraining Trigger]
+    A[Upload receipt image/PDF] --> B[Preprocess]
+    B --> C[OCR: Textract -> Tesseract fallback]
+    C --> D[LLM extraction to Receipt schema]
+    D --> E[Confidence scoring + warnings]
+    E --> F[Line-item catalog matching]
+    F --> G{Confidence level}
+    G -->|High| H[Auto-complete]
+    G -->|Medium/Low| I[Review queue]
+    I --> J[Human corrections]
+    J --> K[Error analysis]
+    J --> L[Retraining run]
 ```
 
-## Tech stack
-- **API**: FastAPI, Pydantic v2, async SQLAlchemy
-- **Queueing**: Celery + Redis
-- **Database**: PostgreSQL + pgvector
-- **OCR/LLM**: AWS Textract, pytesseract, OpenAI, Instructor
-- **Matching & analytics**: rapidfuzz, embeddings, pandas
-- **Observability**: structlog, Prometheus `/metrics`
-- **Testing**: pytest, pytest-asyncio, httpx
-
-## Project structure
-- `app/main.py`: FastAPI app and lifecycle wiring
-- `app/routers/`: API route groups (`receipts`, `review`, `catalog`, `analytics`, `retrain`)
-- `app/services/`: OCR, extraction, confidence, matching, error analysis, retraining
-- `app/models/`: DB ORM models and API schemas
-- `app/worker.py`: Celery tasks + scheduled jobs
-- `benchmarks/`: CORD evaluation and report generation scripts
-- `tests/`: unit/integration-oriented test modules
+## Core capabilities
+- **Asynchronous ingestion** with Celery workers (`/receipts/upload`, `/receipts/batch`)
+- **Typed extraction** via Pydantic schema (`Receipt`, `LineItem`, parse warnings, confidence levels)
+- **Human-in-the-loop review** with correction/approve/skip workflows
+- **Product normalization** using rapidfuzz first, embeddings fallback (pgvector)
+- **Analytics APIs** for error patterns, calibration, estimated accuracy, and cost summary
+- **Scheduled learning loop** with nightly error analysis and monthly retraining tasks
+- **Benchmark suite** for CORD dataset with OpenAI, Groq, or local heuristic extraction
 
 ## Quick start
 ### 1) Configure environment
-Copy `.env.example` to `.env` and set required values:
-- `OPENAI_API_KEY` or `GROQ_API_KEY`
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (optional if using fallback OCR only)
+Copy `.env.example` to `.env` and set values:
+- Required for LLM extraction: `OPENAI_API_KEY` or `GROQ_API_KEY`
+- Optional for cloud OCR: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+- For local OCR on Windows, you can set `TESSERACT_CMD` if Tesseract is not in PATH
 
 ### 2) Run with Docker Compose
-`docker compose up --build`
+```bash
+docker compose up --build
+```
+
 ### 3) Seed sample product catalog (recommended)
-`python -m app.scripts.seed_catalog --csv data/sample_products.csv`
+```bash
+python -m app.scripts.seed_catalog --csv data/sample_products.csv
+```
 
 ### 4) Open API docs
-`http://localhost:8000/docs`
+- Swagger UI: `http://localhost:8000/docs`
+- Health check: `http://localhost:8000/health`
 
-## API surface
-### Receipt processing
+## Local development (without Docker)
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+In separate terminals:
+```bash
+celery -A app.worker.celery_app worker --loglevel=info
+celery -A app.worker.celery_app beat --loglevel=info
+```
+
+## API overview
+### Receipt pipeline
 - `POST /receipts/upload`
 - `POST /receipts/batch`
-- `GET /receipts/{id}`
-- `GET /receipts/{id}/image`
-- `GET /receipts/{id}/ocr`
+- `GET /receipts/batch/{job_id}`
+- `GET /receipts/{receipt_id}`
+- `GET /receipts/{receipt_id}/image`
+- `GET /receipts/{receipt_id}/ocr`
 - `GET /receipts/`
 - `GET /receipts/stats`
 
-### Human review
+### Review operations
 - `GET /review/queue`
-- `GET /review/{id}`
-- `POST /review/{id}/correct`
-- `POST /review/{id}/approve`
-- `POST /review/{id}/skip`
+- `GET /review/{review_id}`
+- `POST /review/{review_id}/correct`
+- `POST /review/{review_id}/approve`
+- `POST /review/{review_id}/skip`
 - `GET /review/stats`
 
-### Catalog / analytics / retraining
-- `GET|POST /catalog/*`
-- `GET|POST /analytics/*`
-- `POST /retrain/trigger`
-- `GET /retrain/runs`
-- `GET /retrain/runs/{id}`
+### Catalog, analytics, retraining
+- `GET /catalog/products`, `POST /catalog/products`, `GET /catalog/search`
+- `POST /catalog/match`, `POST /catalog/embed`
+- `GET /analytics/errors`, `POST /analytics/analyze`
+- `GET /analytics/accuracy`, `GET /analytics/confidence`, `GET /analytics/cost`
+- `POST /retrain/trigger`, `GET /retrain/runs`, `GET /retrain/runs/{run_id}`
 
 ### System
-- `GET /health`
-- `GET /metrics`
+- `GET /health` (database + redis status)
+- `GET /metrics` (Prometheus metrics)
 
-`/health` reports both database and Redis status.
+## Benchmarking (CORD v2)
+`benchmarks/run_cord.py` supports three extraction backends:
+- `heuristic` → local/no API cost
+- `openai` → OpenAI structured extraction
+- `groq` → Groq OpenAI-compatible structured extraction
 
-## Testing and quality checks
-- `python -m compileall app tests benchmarks`
-- `python -m pytest tests`
+Example commands:
+```bash
+python benchmarks/run_cord.py --split test --limit 100 --extraction-mode heuristic
+python benchmarks/run_cord.py --split test --limit 100 --extraction-mode openai
+python benchmarks/run_cord.py --split test --limit 100 --extraction-mode groq
+```
 
-## Continuous Integration
-GitHub Actions workflow runs on push/PR and executes:
-- dependency installation
-- compile checks (`python -m compileall app tests benchmarks`)
-- full test suite (`python -m pytest tests`)
+Generate report markdown from benchmark JSON:
+```bash
+python benchmarks/report.py
+python benchmarks/report.py --input benchmarks/results/cord_test_<timestamp>.json --output benchmarks/results/cord_report.md
+```
 
-## Benchmarking (CORD)
-Run CORD benchmark with local no-cost heuristic extraction:
-- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode heuristic`
+### Latest tuned Groq snapshot (50 CORD samples)
+Source: `benchmarks/results/cord_test_20260524_234250.json`
+- Success: **45/50** (`90%`)
+- Total exact match: **44.4%**
+- Line-item price exact match: **34.4%**
+- Line-item name fuzzy match: **36.7%**
+- Avg latency: **23.73s** (p95: **48.38s**)
 
-Run CORD benchmark with OpenAI extraction (paid API usage):
-- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode openai`
+## Quality and CI
+Local checks:
+```bash
+python -m compileall app tests benchmarks
+python -m pytest tests -q
+```
 
-Run CORD benchmark with Groq extraction:
-- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode groq`
+CI workflow (`.github/workflows/ci.yml`) runs compile checks and the test suite on push/PR to `main`.
 
-Notes:
-- CORD samples are downloaded automatically from Hugging Face.
-- Local OCR requires Tesseract to be installed.
-- OpenAI mode requires `OPENAI_API_KEY`.
-- Groq mode requires `GROQ_API_KEY`.
-
-Generate markdown report from latest benchmark JSON:
-- `python benchmarks/report.py`
-
-Generate report from explicit file:
-- `python benchmarks/report.py --input benchmarks/results/cord_test_<timestamp>.json --output benchmarks/results/cord_report.md`
+## Project layout
+```text
+app/
+  main.py
+  worker.py
+  routers/
+  services/
+  models/
+  scripts/
+benchmarks/
+  run_cord.py
+  report.py
+tests/
+docker-compose.yml
+requirements.txt
+```
 
 ## License
-This project is licensed under the **MIT License**. See `LICENSE`.
+MIT License. See `LICENSE`.
