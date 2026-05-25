@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default="")
     openai_model: str = "gpt-4o"
     openai_embedding_model: str = "text-embedding-3-small"
+    groq_api_key: str = Field(default="")
+    groq_model: str = "qwen/qwen3-32b"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_region: str = "us-east-1"

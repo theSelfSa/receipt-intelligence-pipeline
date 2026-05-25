@@ -1,6 +1,8 @@
 import asyncio
 from collections import defaultdict
 from io import BytesIO
+import os
+from pathlib import Path
 
 import boto3
 import pytesseract
@@ -19,6 +21,7 @@ class OCRResult(BaseModel):
 
 class OCRService:
     def __init__(self, settings: Settings | None = None) -> None:
+        self._configure_tesseract_binary()
         self._textract_client = self._build_textract_client(settings)
 
     async def extract_text(self, image: Image.Image) -> OCRResult:
@@ -115,6 +118,25 @@ class OCRService:
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _configure_tesseract_binary() -> None:
+        candidates: list[str] = []
+        env_path = os.getenv("TESSERACT_CMD")
+        if env_path:
+            candidates.append(env_path)
+
+        candidates.extend(
+            [
+                "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                "C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+            ]
+        )
+
+        for candidate in candidates:
+            if Path(candidate).exists():
+                pytesseract.pytesseract.tesseract_cmd = str(Path(candidate))
+                return
 
 
 def _to_confidence_ratio(value: object) -> float | None:

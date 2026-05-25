@@ -52,7 +52,7 @@ flowchart LR
 ## Quick start
 ### 1) Configure environment
 Copy `.env.example` to `.env` and set required values:
-- `OPENAI_API_KEY`
+- `OPENAI_API_KEY` or `GROQ_API_KEY`
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (optional if using fallback OCR only)
 
 ### 2) Run with Docker Compose
@@ -105,8 +105,20 @@ GitHub Actions workflow runs on push/PR and executes:
 - full test suite (`python -m pytest tests`)
 
 ## Benchmarking (CORD)
-Run CORD benchmark:
-- `python benchmarks/run_cord.py --split test --limit 100`
+Run CORD benchmark with local no-cost heuristic extraction:
+- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode heuristic`
+
+Run CORD benchmark with OpenAI extraction (paid API usage):
+- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode openai`
+
+Run CORD benchmark with Groq extraction:
+- `python benchmarks/run_cord.py --split test --limit 100 --extraction-mode groq`
+
+Notes:
+- CORD samples are downloaded automatically from Hugging Face.
+- Local OCR requires Tesseract to be installed.
+- OpenAI mode requires `OPENAI_API_KEY`.
+- Groq mode requires `GROQ_API_KEY`.
 
 Generate markdown report from latest benchmark JSON:
 - `python benchmarks/report.py`

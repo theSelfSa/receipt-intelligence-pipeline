@@ -34,6 +34,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="test", help="Dataset split to evaluate.")
     parser.add_argument("--limit", type=int, default=100, help="Maximum number of samples to process.")
     parser.add_argument(
+        "--extraction-mode",
+        choices=("openai", "groq", "heuristic"),
+        default="openai",
+        help="Extraction backend. 'openai' and 'groq' use API providers; 'heuristic' runs locally without API usage.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -44,6 +50,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Maximum number of per-sample failures to store in JSON.",
+    )
+    parser.add_argument(
+        "--request-delay-seconds",
+        type=float,
+        default=0.0,
+        help="Optional delay between samples to reduce provider rate-limit pressure.",
     )
     return parser.parse_args()
 
@@ -64,14 +76,23 @@ async def _run() -> Path:
         from app.services.confidence import compute_confidence
         from app.services.extraction import ReceiptExtractionService
         from app.services.ocr import OCRService
+        from benchmarks.groq_extractor import GroqReceiptExtractionService
+        from benchmarks.heuristic_extractor import HeuristicReceiptExtractor
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Project dependencies are missing. Install dependencies from requirements.txt."
         ) from exc
 
     settings = get_settings()
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is required to run benchmark extraction.")
+    extraction_mode = args.extraction_mode.lower()
+    if extraction_mode == "openai" and not settings.openai_api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is required when --extraction-mode openai is selected."
+        )
+    if extraction_mode == "groq" and not settings.groq_api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is required when --extraction-mode groq is selected."
+        )
 
     dataset = load_dataset(args.dataset, split=args.split)
     total_available = len(dataset)
@@ -79,10 +100,22 @@ async def _run() -> Path:
     samples = dataset.select(range(max_samples))
 
     ocr = OCRService(settings=settings)
-    extractor = ReceiptExtractionService(
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-    )
+    if extraction_mode == "openai":
+        extraction_model = settings.openai_model
+        extractor = ReceiptExtractionService(
+            api_key=settings.openai_api_key,
+            model=extraction_model,
+        )
+    elif extraction_mode == "groq":
+        extraction_model = settings.groq_model
+        extractor = GroqReceiptExtractionService(
+            api_key=settings.groq_api_key,
+            model=extraction_model,
+            base_url=settings.groq_base_url,
+        )
+    else:
+        extraction_model = "heuristic"
+        extractor = HeuristicReceiptExtractor()
 
     merchant_exact_hits = 0
     merchant_fuzzy_hits = 0
@@ -109,61 +142,86 @@ async def _run() -> Path:
 
     for idx, sample in enumerate(samples):
         sample_id = sample.get("id", idx)
-        try:
-            image = _coerce_image(sample.get("image"))
-            gt = _parse_ground_truth(sample.get("ground_truth"))
+        print(f"[{idx + 1}/{max_samples}] processing sample_id={sample_id}")
+        max_rate_limit_retries = 2 if extraction_mode in {"openai", "groq"} else 0
+        rate_retry = 0
+        while True:
+            try:
+                image = _coerce_image(sample.get("image"))
+                gt = _parse_ground_truth(sample.get("ground_truth"))
 
-            started = perf_counter()
-            ocr_result = await ocr.extract_text(image)
-            extracted = await extractor.extract(ocr_result.raw_text)
-            _, confidence_level = compute_confidence(extracted, ocr_result.mean_ocr_confidence)
-            latency = perf_counter() - started
+                started = perf_counter()
+                ocr_result = await ocr.extract_text(image)
+                extracted = await extractor.extract(ocr_result.raw_text)
+                _, confidence_level = compute_confidence(extracted, ocr_result.mean_ocr_confidence)
+                latency = perf_counter() - started
 
-            latency_values.append(latency)
-            estimated_tokens_total += int(len(ocr_result.raw_text) * TOKENS_PER_CHAR)
+                latency_values.append(latency)
+                if extraction_mode in {"openai", "groq"}:
+                    estimated_tokens_total += int(len(ocr_result.raw_text) * TOKENS_PER_CHAR)
 
-            (
-                merchant_exact,
-                merchant_fuzzy,
-                date_exact,
-                total_exact,
-                line_name_hit_count,
-                line_name_count,
-                line_price_hit_count,
-                line_price_count,
-                receipt_accuracy,
-            ) = _evaluate_sample(gt, extracted)
+                (
+                    merchant_exact,
+                    merchant_fuzzy,
+                    date_exact,
+                    total_exact,
+                    line_name_hit_count,
+                    line_name_count,
+                    line_price_hit_count,
+                    line_price_count,
+                    receipt_accuracy,
+                ) = _evaluate_sample(gt, extracted)
 
-            if gt.merchant_name:
-                merchant_total += 1
-                merchant_exact_hits += int(merchant_exact)
-                merchant_fuzzy_hits += int(merchant_fuzzy)
-            if gt.receipt_date:
-                date_total += 1
-                date_exact_hits += int(date_exact)
-            if gt.total is not None:
-                total_total += 1
-                total_exact_hits += int(total_exact)
+                if gt.merchant_name:
+                    merchant_total += 1
+                    merchant_exact_hits += int(merchant_exact)
+                    merchant_fuzzy_hits += int(merchant_fuzzy)
+                if gt.receipt_date:
+                    date_total += 1
+                    date_exact_hits += int(date_exact)
+                if gt.total is not None:
+                    total_total += 1
+                    total_exact_hits += int(total_exact)
 
-            line_name_total += line_name_count
-            line_name_matched += line_name_hit_count
+                line_name_total += line_name_count
+                line_name_matched += line_name_hit_count
 
-            line_price_total += line_price_count
-            line_price_matched += line_price_hit_count
+                line_price_total += line_price_count
+                line_price_matched += line_price_hit_count
 
-            calibration[confidence_level.value].append(receipt_accuracy)
-            success_count += 1
-        except Exception as exc:
-            if len(failures) < args.max_failure_records:
-                failures.append(
-                    {
-                        "sample_index": idx,
-                        "sample_id": sample_id,
-                        "error": str(exc),
-                    }
-                )
+                calibration[confidence_level.value].append(receipt_accuracy)
+                success_count += 1
+                print(f"[{idx + 1}/{max_samples}] success latency={latency:.2f}s")
+                break
+            except Exception as exc:
+                if (
+                    rate_retry < max_rate_limit_retries
+                    and _is_rate_limit_exception(exc)
+                ):
+                    rate_retry += 1
+                    print(
+                        f"[{idx + 1}/{max_samples}] rate-limited retry={rate_retry}/{max_rate_limit_retries}"
+                    )
+                    await asyncio.sleep(2 * rate_retry)
+                    continue
+                if len(failures) < args.max_failure_records:
+                    failures.append(
+                        {
+                            "sample_index": idx,
+                            "sample_id": sample_id,
+                            "error": str(exc),
+                        }
+                    )
+                print(f"[{idx + 1}/{max_samples}] failed: {str(exc)[:160]}")
+                break
+        if args.request_delay_seconds > 0:
+            await asyncio.sleep(args.request_delay_seconds)
 
-    estimated_cost_total = estimated_tokens_total * DEFAULT_COST_PER_TOKEN_USD
+    estimated_cost_total: float | None = (
+        estimated_tokens_total * DEFAULT_COST_PER_TOKEN_USD
+        if extraction_mode == "openai"
+        else None
+    )
     output_path = args.output or _default_output_path(args.split)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -203,7 +261,9 @@ async def _run() -> Path:
             "estimated_tokens_total": estimated_tokens_total,
             "estimated_cost_total_usd": estimated_cost_total,
             "estimated_cost_per_receipt_usd": (
-                estimated_cost_total / success_count if success_count > 0 else None
+                estimated_cost_total / success_count
+                if estimated_cost_total is not None and success_count > 0
+                else None
             ),
         },
     }
@@ -211,6 +271,8 @@ async def _run() -> Path:
     payload = {
         "dataset": args.dataset,
         "split": args.split,
+        "extraction_mode": extraction_mode,
+        "extraction_model": extraction_model,
         "requested_samples": max_samples,
         "processed_samples": success_count + len(failures),
         "success_count": success_count,
@@ -584,6 +646,11 @@ def _find_first_float_by_keys(root: Any, keys: set[str]) -> float | None:
 def _default_output_path(split: str) -> Path:
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     return Path("benchmarks") / "results" / f"cord_{split}_{timestamp}.json"
+
+
+def _is_rate_limit_exception(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text
 
 
 def _rapidfuzz_fuzz():
